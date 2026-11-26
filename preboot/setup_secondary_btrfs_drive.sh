@@ -12,6 +12,7 @@ DEFAULT_DISK_BY_ID="/dev/disk/by-id/nvme-Samsung_SSD_970_EVO_500GB_S5H7NS0NB3527
 UDEV_RULE_NAME="99-samsung-970-evo-nvme.rules"
 MOUNT_DATA="/mnt/data"
 MOUNT_SNAPSHOTS="/mnt/data/.snapshots"
+FSTAB="/etc/fstab"
 BTRFS_OPTS_BASE="defaults,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,nofail"
 SECONDARY_TOP_MNT=""
 
@@ -161,6 +162,19 @@ unmount_existing_target_mounts() {
   local mounted
   mounted=$(lsblk -lnro MOUNTPOINT "$disk" | awk 'NF {print; exit}')
   [[ -z "$mounted" ]] || die "Disk $disk has active mounts ($mounted); unmount them first."
+}
+
+# Print the partition to configure. A refused --format must not unmount anything first.
+prepare_secondary_partition() {
+  local disk=$1 do_format=$2 do_force=$3
+  if (( do_format )); then
+    verify_disk_unformatted_or_forced "$disk" "$do_force"
+    unmount_existing_target_mounts "$disk" >&2
+    partition_and_format_disk "$disk"
+  else
+    unmount_existing_target_mounts "$disk" >&2
+    locate_existing_btrfs_partition "$disk"
+  fi
 }
 
 verify_disk_unformatted_or_forced() {
@@ -317,47 +331,60 @@ configure_user_links() {
   fi
 }
 
+verify_secondary_mount() {
+  local target=$1 fsroot=$2 uuid=$3
+  [[ $(findmnt -n -o FSTYPE --mountpoint "$target") == btrfs &&
+     $(findmnt -n -o FSROOT --mountpoint "$target") == "$fsroot" &&
+     $(findmnt -n -o UUID --mountpoint "$target") == "$uuid" ]]
+}
+
 update_fstab_and_mount() {
-  local part=$1 target_user=$2 uuid rendered staged backup
+  local part=$1 target_user=$2 uuid rendered staged backup verify_output mounted_data=0
   uuid=$(blkid -s UUID -o value "$part")
   [[ -n "$uuid" ]] || die "Could not determine Btrfs UUID for $part."
 
-  rendered="$WORK_DIR/fstab"
-  render_secondary_fstab /etc/fstab "$uuid" > "$rendered"
+  # findmnt --verify fails for fstab targets that do not exist, and $MOUNT_SNAPSHOTS
+  # lives inside @data, so mount @data and create it there before validating.
+  mkdir -p "$MOUNT_DATA"
+  if ! findmnt -n --mountpoint "$MOUNT_DATA" >/dev/null 2>&1; then
+    mount -t btrfs -o "$BTRFS_OPTS_BASE,subvol=@data" "UUID=$uuid" "$MOUNT_DATA"
+    mounted_data=1
+  fi
+  if ! verify_secondary_mount "$MOUNT_DATA" /@data "$uuid"; then
+    (( ! mounted_data )) || umount "$MOUNT_DATA"
+    die "Failed to verify $MOUNT_DATA mount."
+  fi
+  mkdir -p "$MOUNT_SNAPSHOTS"
 
-  if ! cmp -s "$rendered" /etc/fstab; then
-    findmnt --verify --tab-file "$rendered" >/dev/null
-    if ! compgen -G "/etc/fstab.pre-secondary-btrfs.*" >/dev/null; then
-      backup=$(mktemp /etc/fstab.pre-secondary-btrfs.XXXXXX)
-      cp -a /etc/fstab "$backup"
-      log_info "Backed up /etc/fstab to $backup."
+  rendered="$WORK_DIR/fstab"
+  render_secondary_fstab "$FSTAB" "$uuid" > "$rendered"
+
+  if ! cmp -s "$rendered" "$FSTAB"; then
+    if ! verify_output=$(findmnt --verify --tab-file "$rendered" 2>&1); then
+      (( ! mounted_data )) || umount "$MOUNT_DATA"
+      die "New fstab failed findmnt --verify; $FSTAB left unchanged:"$'\n'"$verify_output"
     fi
-    staged=$(mktemp /etc/.fstab.eos-secondary.XXXXXX)
+    if ! compgen -G "$FSTAB.pre-secondary-btrfs.*" >/dev/null; then
+      backup=$(mktemp "$FSTAB.pre-secondary-btrfs.XXXXXX")
+      cp -a "$FSTAB" "$backup"
+      log_info "Backed up $FSTAB to $backup."
+    fi
+    staged=$(mktemp "${FSTAB%/*}/.fstab.eos-secondary.XXXXXX")
     if ! cp -a "$rendered" "$staged" \
       || ! chown root:root "$staged" \
       || ! chmod 0644 "$staged" \
-      || ! mv -Tf -- "$staged" /etc/fstab; then
+      || ! mv -Tf -- "$staged" "$FSTAB"; then
       rm -f -- "$staged"
       return 1
     fi
   fi
 
-  mkdir -p "$MOUNT_DATA"
   systemctl daemon-reload
-  if ! findmnt -n --mountpoint "$MOUNT_DATA" >/dev/null 2>&1; then
-    mount "$MOUNT_DATA"
-  fi
-  mkdir -p "$MOUNT_SNAPSHOTS"
   if ! findmnt -n --mountpoint "$MOUNT_SNAPSHOTS" >/dev/null 2>&1; then
     mount "$MOUNT_SNAPSHOTS"
   fi
-
-  [[ $(findmnt -n -o FSTYPE --mountpoint "$MOUNT_DATA") == btrfs &&
-     $(findmnt -n -o FSROOT --mountpoint "$MOUNT_DATA") == /@data &&
-     $(findmnt -n -o UUID --mountpoint "$MOUNT_DATA") == "$uuid" ]] || die "Failed to verify $MOUNT_DATA mount."
-  [[ $(findmnt -n -o FSTYPE --mountpoint "$MOUNT_SNAPSHOTS") == btrfs &&
-     $(findmnt -n -o FSROOT --mountpoint "$MOUNT_SNAPSHOTS") == /@snapshots &&
-     $(findmnt -n -o UUID --mountpoint "$MOUNT_SNAPSHOTS") == "$uuid" ]] || die "Failed to verify $MOUNT_SNAPSHOTS mount."
+  verify_secondary_mount "$MOUNT_DATA" /@data "$uuid" || die "Failed to verify $MOUNT_DATA mount."
+  verify_secondary_mount "$MOUNT_SNAPSHOTS" /@snapshots "$uuid" || die "Failed to verify $MOUNT_SNAPSHOTS mount."
 
   if [[ -n "$target_user" ]] && id -u "$target_user" >/dev/null 2>&1; then
     local uid gid user_home
@@ -406,14 +433,7 @@ main() {
   local disk part target_user=${SUDO_USER:-}
   disk=$(resolve_target_disk "$explicit_disk")
   verify_disk_is_secondary "$disk"
-  unmount_existing_target_mounts "$disk"
-
-  if (( do_format )); then
-    verify_disk_unformatted_or_forced "$disk" "$do_force"
-    part=$(partition_and_format_disk "$disk")
-  else
-    part=$(locate_existing_btrfs_partition "$disk")
-  fi
+  part=$(prepare_secondary_partition "$disk" "$do_format" "$do_force")
 
   ensure_subvolumes "$part"
   update_fstab_and_mount "$part" "$target_user"

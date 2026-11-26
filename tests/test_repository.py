@@ -1004,6 +1004,99 @@ verify_disk_unformatted_or_forced /dev/nvme9n1 1
 ''', script='preboot/setup_secondary_btrfs_drive.sh')
         self.assertEqual(forced.returncode, 0, forced.stderr)
 
+    def test_secondary_btrfs_refused_format_leaves_existing_mounts_alone(self):
+        stubs = '''
+unmount_existing_target_mounts() { printf 'UNMOUNTED %s\\n' "$1" >&2; }
+partition_and_format_disk() { printf 'FORMATTED %s\\n' "$1" >&2; printf '/dev/nvme9n1p1\\n'; }
+locate_existing_btrfs_partition() { printf 'LOCATED %s\\n' "$1" >&2; printf '/dev/nvme9n1p1\\n'; }
+lsblk() { printf '/dev/nvme9n1\\n/dev/nvme9n1p1\\n'; }
+blkid() { if [[ ${5:-} == /dev/nvme9n1p1 ]]; then printf 'btrfs\\n'; fi; }
+'''
+        script = 'preboot/setup_secondary_btrfs_drive.sh'
+        refused = self.bash(stubs + 'prepare_secondary_partition /dev/nvme9n1 1 0', script=script)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('pass --format --force', refused.stderr)
+        self.assertNotIn('UNMOUNTED', refused.stderr)
+        self.assertNotIn('FORMATTED', refused.stderr)
+
+        forced = self.bash(stubs + 'prepare_secondary_partition /dev/nvme9n1 1 1', script=script)
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertEqual(forced.stdout, '/dev/nvme9n1p1\n')
+        self.assertEqual(forced.stderr.splitlines(), ['UNMOUNTED /dev/nvme9n1', 'FORMATTED /dev/nvme9n1'])
+
+        existing = self.bash(stubs + 'prepare_secondary_partition /dev/nvme9n1 0 0', script=script)
+        self.assertEqual(existing.returncode, 0, existing.stderr)
+        self.assertEqual(existing.stdout, '/dev/nvme9n1p1\n')
+        self.assertEqual(existing.stderr.splitlines(), ['UNMOUNTED /dev/nvme9n1', 'LOCATED /dev/nvme9n1'])
+
+    def run_secondary_fstab_update(self, case, env=None):
+        """Run update_fstab_and_mount against fixture paths with a findmnt stub that,
+        like util-linux, fails --verify when an fstab target directory does not exist."""
+        case_root = self.root / case
+        etc = case_root / 'etc'
+        etc.mkdir(parents=True)
+        fstab = etc / 'fstab'
+        fstab.write_text('UUID=root-uuid\t/\tbtrfs\tsubvol=@\t0 0\n')
+        work = case_root / 'work'
+        work.mkdir()
+        state = case_root / 'state'
+        state.mkdir()
+        mnt_data = case_root / 'mnt/data'
+        result = self.bash(r'''
+FSTAB=$1 WORK_DIR=$2 MOUNT_DATA=$3 MOUNT_SNAPSHOTS=$3/.snapshots STATE=$4
+key() { printf '%s/%s' "$STATE" "$(printf '%s' "$1" | tr / _)"; }
+blkid() { printf 'data-uuid\n'; }
+chown() { :; }
+systemctl() { :; }
+mount() { printf 'mount %s\n' "$*" >> "$STATE/log"; touch "$(key "${!#}")"; }
+umount() { printf 'umount %s\n' "$*" >> "$STATE/log"; rm -f -- "$(key "${!#}")"; }
+findmnt() {
+  if [[ $1 == --verify ]]; then
+    local source target rest status=0
+    while read -r source target rest; do
+      [[ -n $source && $source != \#* ]] || continue
+      [[ -d $target ]] || { printf '%s\n   [E] unreachable on boot required target\n' "$target"; status=1; }
+    done < "$3"
+    [[ -z ${VERIFY_FAIL:-} ]] || { printf '[E] simulated verify failure\n'; status=1; }
+    return "$status"
+  fi
+  local target=${!#}
+  [[ -e $(key "$target") ]] || return 1
+  case $3 in
+    FSTYPE) printf 'btrfs\n' ;;
+    FSROOT) [[ $target == "$MOUNT_DATA" ]] && printf '/@data\n' || printf '/@snapshots\n' ;;
+    UUID) printf 'data-uuid\n' ;;
+  esac
+}
+update_fstab_and_mount /dev/fake1 ""
+''', fstab, work, mnt_data, state, script='preboot/setup_secondary_btrfs_drive.sh', env=env)
+        log = (state / 'log').read_text().splitlines() if (state / 'log').exists() else []
+        return result, fstab, mnt_data, log
+
+    def test_secondary_btrfs_fstab_verify_runs_after_mount_points_exist(self):
+        result, fstab, mnt_data, log = self.run_secondary_fstab_update('fresh')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = fstab.read_text().splitlines()
+        self.assertEqual(lines[0], 'UUID=root-uuid\t/\tbtrfs\tsubvol=@\t0 0')
+        self.assertTrue(lines[1].startswith(f'UUID=data-uuid\t{mnt_data}\tbtrfs\t'))
+        self.assertTrue(lines[1].endswith(',subvol=@data\t0\t0'))
+        self.assertTrue(lines[2].startswith(f'UUID=data-uuid\t{mnt_data}/.snapshots\tbtrfs\t'))
+        self.assertTrue(lines[2].endswith(',subvol=@snapshots\t0\t0'))
+        self.assertEqual(len(list(fstab.parent.glob('fstab.pre-secondary-btrfs.*'))), 1)
+        self.assertEqual(len(log), 2, log)
+        self.assertTrue(log[0].startswith('mount -t btrfs -o '))
+        self.assertTrue(log[0].endswith(f',subvol=@data UUID=data-uuid {mnt_data}'))
+        self.assertEqual(log[1], f'mount {mnt_data}/.snapshots')
+
+    def test_secondary_btrfs_failed_fstab_verify_leaves_fstab_and_unmounts_data(self):
+        result, fstab, mnt_data, log = self.run_secondary_fstab_update('verify-fails', env={'VERIFY_FAIL': '1'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('left unchanged', result.stderr)
+        self.assertIn('simulated verify failure', result.stderr)
+        self.assertEqual(fstab.read_text(), 'UUID=root-uuid\t/\tbtrfs\tsubvol=@\t0 0\n')
+        self.assertEqual(list(fstab.parent.iterdir()), [fstab])
+        self.assertEqual(log[-1], f'umount {mnt_data}')
+
     @unittest.skipIf(os.geteuid() == 0, 'requires non-root user to exercise sudo re-exec guard')
     def test_preboot_non_root_sudo_reexec_points_to_existing_script(self):
         bin_dir = self.root / 'bin'
