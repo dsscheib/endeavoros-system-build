@@ -1,0 +1,147 @@
+---
+- name: Configure and install Visual Studio Code
+  tags:
+    - vscode
+  block:
+    - name: Install Visual Studio Code from AUR
+      ansible.builtin.include_role:
+        name: aur_install
+        apply:
+          tags:
+            - desktop_apps
+            - desktop_gui
+            - vscode
+      vars:
+        aur_install_packages: "{{ aur_vscode_packages }}"
+
+- name: Configure and install KiCad and kicad-python
+  tags:
+    - kicad
+  block:
+    - name: Install KiCad packages
+      community.general.pacman:
+        name: >-
+          {{
+            pacman_kicad_packages
+            + (['kicad-library-3d'] if (install_kicad_3d_libraries | bool) else [])
+          }}
+        state: present
+      become: true
+
+    - name: Check whether uv is available for kicad-python venv
+      ansible.builtin.command:
+        argv:
+          - which
+          - uv
+      environment:
+        PATH: "{{ workstation_local_bin }}:{{ workstation_home }}/.local/share/mise/shims:{{ ansible_facts['env'].PATH | default('/usr/bin:/bin') }}"
+      register: desktop_apps_uv_which
+      changed_when: false
+      check_mode: false
+      failed_when: false
+
+    - name: Warn when uv is unavailable for kicad-python venv
+      ansible.builtin.debug:
+        msg: "WARNING: uv is unavailable; skipping kicad-python virtual environment setup."
+      when: desktop_apps_uv_which.rc != 0
+
+    - name: Check kicad-python venv python executable
+      ansible.builtin.stat:
+        path: "{{ workstation_home }}/.local/share/kicad-python/bin/python"
+      register: desktop_apps_kicad_venv_stat
+      when: desktop_apps_uv_which.rc == 0
+
+    - name: Check installed kicad-python package version
+      ansible.builtin.command:
+        argv:
+          - "{{ desktop_apps_uv_which.stdout | trim }}"
+          - pip
+          - show
+          - --python
+          - "{{ workstation_home }}/.local/share/kicad-python/bin/python"
+          - kicad-python
+      register: desktop_apps_kicad_py_show
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      when:
+        - desktop_apps_uv_which.rc == 0
+        - desktop_apps_kicad_venv_stat.stat.exists
+
+    - name: Report kicad-python venv drift in check mode
+      ansible.builtin.debug:
+        msg: "Would create or update kicad-python venv to {{ kicad_python_version }}"
+      changed_when: true
+      when:
+        - ansible_check_mode
+        - desktop_apps_uv_which.rc == 0
+        - >-
+          not desktop_apps_kicad_venv_stat.stat.exists
+          or (desktop_apps_kicad_py_show.rc | default(1)) != 0
+          or ('Version: ' ~ kicad_python_version) not in (desktop_apps_kicad_py_show.stdout_lines | default([]))
+
+    - name: Set up kicad-python virtual environment
+      when:
+        - desktop_apps_uv_which.rc == 0
+        - not ansible_check_mode
+      block:
+        - name: Create kicad-python virtual environment
+          ansible.builtin.command:
+            argv:
+              - "{{ desktop_apps_uv_which.stdout | trim }}"
+              - venv
+              - --clear
+              - "{{ workstation_home }}/.local/share/kicad-python"
+          changed_when: true
+          when: not desktop_apps_kicad_venv_stat.stat.exists
+
+        - name: Install pinned kicad-python package
+          ansible.builtin.command:
+            argv:
+              - "{{ desktop_apps_uv_which.stdout | trim }}"
+              - pip
+              - install
+              - --python
+              - "{{ workstation_home }}/.local/share/kicad-python/bin/python"
+              - "kicad-python=={{ kicad_python_version }}"
+          changed_when: true
+          when: >-
+            not desktop_apps_kicad_venv_stat.stat.exists
+            or (desktop_apps_kicad_py_show.rc | default(1)) != 0
+            or ('Version: ' ~ kicad_python_version) not in (desktop_apps_kicad_py_show.stdout_lines | default([]))
+
+- name: Install desktop utility and CAD Pacman packages
+  community.general.pacman:
+    name: "{{ pacman_desktop_packages }}"
+    state: present
+  become: true
+  tags:
+    - desktop_packages
+
+- name: Install desktop utility and CAD AUR packages
+  ansible.builtin.include_role:
+    name: aur_install
+    apply:
+      tags:
+        - desktop_apps
+        - desktop_gui
+        - desktop_packages
+  vars:
+    aur_install_packages: "{{ aur_desktop_packages }}"
+  tags:
+    - desktop_packages
+
+- name: Install optional Dropbox AUR package when enabled
+  ansible.builtin.include_role:
+    name: aur_install
+    apply:
+      tags:
+        - desktop_apps
+        - desktop_gui
+        - desktop_packages
+  vars:
+    aur_install_packages: "{{ aur_dropbox_packages }}"
+    aur_install_ignore_errors: true
+  when: install_dropbox | bool
+  tags:
+    - desktop_packages

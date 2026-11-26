@@ -1,0 +1,239 @@
+---
+# Non-secret defaults for Ansible-managed workstation components (EndeavourOS x86_64).
+# Override per-machine values in ansible/group_vars/all/local.yml (gitignored).
+
+workstation_user: "{{ ansible_facts['user_id'] }}"
+workstation_home: "{{ ansible_facts['user_dir'] }}"
+workstation_local_bin: "{{ workstation_home }}/.local/bin"
+repo_root: "{{ playbook_dir | dirname }}"
+
+# System role behavior
+# Full pacman -Syu is handled by `mise run update`; opt in here only if desired.
+system_pacman_upgrade: false
+install_samsung_970_evo_nvme_rule: false
+
+# AUR helper settings (set enable_aur: false in containers or offline environments)
+enable_aur: true
+aur_helper: "yay"
+
+# Tool / commit pins not managed by Mise
+snapper_rollback_commit: "04488f2350e8ec214277fe7de608492a9ee665a7"
+kicad_python_version: "0.9.0"
+pynvim_version: "0.6.0"
+tpm_commit: "e261deb1b47614eed3400089ce7197dc68acc4eb"
+
+# Repository settings (typically overridden in local.yml)
+dotfiles_repo: ""
+nvim_config_repo: ""
+nvim_config_ref: ""
+
+# Desktop application toggles
+install_dropbox: true
+install_appimagelauncher: false
+install_kicad_3d_libraries: true
+# Four-finger up/down gestures for COSMIC; skipped automatically on desktops without COSMIC.
+# Turn off once COSMIC handles these gestures itself, or each swipe acts twice.
+install_cosmic_swipe: true
+
+# STM32 opt-in installers (run via: mise run role stm32)
+stm32_tools:
+  - cubeide
+  - cubemx
+  - cubeprog
+  - sw4stm32
+
+# Herdr agent skill and integration targets
+herdr_skill_dirs:
+  - "{{ workstation_home }}/.agents/skills"
+  - "{{ workstation_home }}/.claude/skills"
+  - "{{ workstation_home }}/.gemini/config/skills"
+
+herdr_agent_integrations:
+  - cli: claude
+    target: claude
+  - cli: codex
+    target: codex
+  - cli: copilot
+    target: copilot
+  - cli: agy
+    target: antigravity-cli
+
+# Snapper runs by default (requires Btrfs @ root layout); hibernation is opt-in (laptops)
+enable_snapper: true
+enable_hibernation: false
+
+# Rootless Podman search registry
+podman_search_registries:
+  - docker.io
+
+# Flathub user applications
+flatpak_apps:
+  - org.freecad.FreeCAD
+  - com.orcaslicer.OrcaSlicer
+
+# Official Arch/EndeavourOS package sets (developer CLI tools like fzf, zoxide, ripgrep,
+# bat, fd, gdu, eza, fastfetch, bottom, starship, rclone, and uv are managed by Mise).
+pacman_base_packages:
+  - ca-certificates
+  - curl
+  - git
+  - gnupg
+  - jq
+  - unzip
+  - tar
+  - xz
+  - fontconfig
+  - python
+  - python-pillow
+  - python-yaml
+  - ufw
+  - bash-completion
+  - desktop-file-utils
+  - age
+  - which
+  - github-cli
+
+pacman_dependency_packages:
+  - zsh
+  - zsh-autosuggestions
+  - zsh-syntax-highlighting
+  - fish
+  - tmux
+  - flatpak
+  - nasm
+  - cmake
+  - ninja
+  - gettext
+  - xclip
+  - wl-clipboard
+  - python-pip
+  - luarocks
+  - pkgconf
+  - openssl
+  - shellcheck
+  - cppcheck
+  - bind
+  - openbsd-netcat
+  - networkmanager-openvpn
+  - rsync
+  - wget
+  - kitty
+  - libsecret
+  - fuse2
+
+pacman_toolchain_gcc_packages:
+  - base-devel
+  - gcc
+  - gdb
+  - binutils
+  - make
+
+pacman_toolchain_llvm_packages:
+  - clang
+  - lld
+  - lldb
+  - llvm
+
+pacman_arm_packages:
+  - arm-none-eabi-gcc
+  - arm-none-eabi-binutils
+  - arm-none-eabi-newlib
+  - arm-none-eabi-gdb
+  - aarch64-linux-gnu-gcc
+  - aarch64-linux-gnu-binutils
+  - aarch64-linux-gnu-gdb
+  - openocd
+  - stlink
+  - libusb
+  - libftdi
+  - picocom
+
+pacman_avr_packages:
+  - avr-gcc
+  - avr-binutils
+  - avr-libc
+  - avrdude
+  - avr-gdb
+  - libusb
+  - libftdi
+  - picocom
+
+pacman_riscv_packages:
+  - riscv64-elf-gcc
+  - riscv64-elf-binutils
+  - riscv64-elf-newlib
+  - riscv64-elf-gdb
+  - qemu-system-riscv
+
+pacman_podman_packages:
+  - podman
+  - buildah
+  - skopeo
+  - slirp4netns
+  - podman-compose
+
+pacman_browser_packages:
+  - firefox-developer-edition
+
+pacman_fonts_packages:
+  - ttf-jetbrains-mono-nerd
+
+pacman_kicad_packages:
+  - kicad
+  - kicad-library
+
+pacman_desktop_packages:
+  - pgcli
+  - openscad
+  - libreoffice-fresh
+  - evince
+  # sigrok logic-analyzer GUI, CLI, and firmware for Cypress FX2-based analyzers
+  - pulseview
+  - sigrok-cli
+  - sigrok-firmware-fx2lafw
+
+pacman_hyper_backup_deps:
+  - bzip2
+  - nss
+  - libxss
+  - libxml2
+  - libxslt
+  - libglvnd
+  - libxkbcommon-x11
+  - xcb-util-wm
+  - qt5-base
+
+pacman_snapper_packages:
+  - btrfs-progs
+  - python
+  - snapper
+  - snap-pac
+  - git
+  - acl
+
+aur_snapper_gui_packages:
+  - btrfs-assistant
+
+# AUR package sets (installed via aur_helper when enable_aur is true)
+aur_browser_packages:
+  - google-chrome
+
+aur_vscode_packages:
+  - visual-studio-code-bin
+
+aur_desktop_packages:
+  - avra
+  - litecli
+  - mycli
+
+aur_synology_packages:
+  - synology-drive
+
+aur_dropbox_packages:
+  - dropbox
+
+aur_appimagelauncher_packages:
+  - appimagelauncher
+
+aur_claude_code_packages:
+  - claude-code

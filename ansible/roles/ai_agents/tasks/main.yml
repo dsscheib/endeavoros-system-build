@@ -1,0 +1,171 @@
+---
+- name: Ensure ~/.local/bin directory exists
+  ansible.builtin.file:
+    path: "{{ workstation_local_bin }}"
+    state: directory
+    mode: "0755"
+  tags:
+    - ai_agents
+    - antigravity
+
+- name: Install Claude Code CLI from AUR
+  tags:
+    - ai_agents
+    - claudecode
+  block:
+    - name: Install claude-code AUR package
+      ansible.builtin.include_role:
+        name: aur_install
+        apply:
+          tags:
+            - ai_agents
+            - claudecode
+      vars:
+        aur_install_packages: "{{ aur_claude_code_packages }}"
+
+    - name: Verify Claude Code CLI version
+      ansible.builtin.command:
+        argv:
+          - claude
+          - --version
+      changed_when: false
+      when:
+        - enable_aur | bool
+        - not ansible_check_mode
+
+- name: Install Antigravity CLI and destructive-git guardrails
+  tags:
+    - ai_agents
+    - antigravity
+  block:
+    - name: Set Antigravity CLI path facts
+      ansible.builtin.set_fact:
+        ai_agents_agy_base: "{{ workstation_home }}/.local/share/eos-workstation"
+        ai_agents_agy_versions: "{{ workstation_home }}/.local/share/eos-workstation/.antigravity-cli.versions"
+        ai_agents_agy_version_dir: >-
+          {{ workstation_home ~ '/.local/share/eos-workstation/.antigravity-cli.versions/'
+             ~ pinned_downloads.antigravity_cli.version }}
+        ai_agents_agy_link: "{{ workstation_home }}/.local/share/eos-workstation/antigravity-cli"
+
+    - name: Ensure Antigravity CLI versions directory exists
+      ansible.builtin.file:
+        path: "{{ ai_agents_agy_versions }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check whether pinned Antigravity CLI binary is installed
+      ansible.builtin.stat:
+        path: "{{ ai_agents_agy_version_dir }}/antigravity"
+      register: ai_agents_agy_stat
+
+    - name: Download and extract pinned Antigravity CLI release
+      when:
+        - not ai_agents_agy_stat.stat.exists
+        - not ansible_check_mode
+      block:
+        - name: Create temporary workspace for Antigravity CLI download
+          ansible.builtin.tempfile:
+            path: "{{ ai_agents_agy_versions }}"
+            state: directory
+            prefix: .tmp-eos-agy-
+          register: ai_agents_agy_tmpdir
+
+        - name: Download verified Antigravity CLI archive
+          ansible.builtin.get_url:
+            url: "{{ pinned_downloads.antigravity_cli.url }}"
+            dest: "{{ ai_agents_agy_tmpdir.path }}/antigravity-cli.tar.gz"
+            checksum: "sha256:{{ pinned_downloads.antigravity_cli.sha256 }}"
+            mode: "0644"
+
+        - name: Extract Antigravity CLI archive safely
+          ansible.builtin.command:
+            argv:
+              - python3
+              - "{{ repo_root }}/scripts/st_assets.py"
+              - tar
+              - "{{ ai_agents_agy_tmpdir.path }}/antigravity-cli.tar.gz"
+              - "{{ ai_agents_agy_tmpdir.path }}/extracted"
+          changed_when: true
+
+        - name: Validate extracted Antigravity CLI binary
+          ansible.builtin.command:
+            argv:
+              - "{{ ai_agents_agy_tmpdir.path }}/extracted/antigravity"
+              - --version
+          changed_when: false
+
+        - name: Remove incomplete Antigravity CLI directory if present
+          ansible.builtin.file:
+            path: "{{ ai_agents_agy_version_dir }}"
+            state: absent
+
+        - name: Move validated Antigravity CLI release into place
+          ansible.builtin.command:
+            argv:
+              - mv
+              - -T
+              - "{{ ai_agents_agy_tmpdir.path }}/extracted"
+              - "{{ ai_agents_agy_version_dir }}"
+          changed_when: true
+      always:
+        - name: Remove temporary Antigravity CLI workspace
+          ansible.builtin.file:
+            path: "{{ ai_agents_agy_tmpdir.path }}"
+            state: absent
+          when: ai_agents_agy_tmpdir.path is defined
+
+    - name: Report Antigravity CLI download drift in check mode
+      ansible.builtin.debug:
+        msg: "Would download and install Antigravity CLI {{ pinned_downloads.antigravity_cli.version }}"
+      changed_when: true
+      when:
+        - ansible_check_mode
+        - not ai_agents_agy_stat.stat.exists
+
+    - name: Link active Antigravity CLI directory
+      ansible.builtin.file:
+        src: "{{ ai_agents_agy_version_dir }}"
+        dest: "{{ ai_agents_agy_link }}"
+        state: link
+        force: true
+      when: not ansible_check_mode or ai_agents_agy_stat.stat.exists
+
+    - name: Prune superseded Antigravity CLI versions
+      ansible.builtin.import_role:
+        name: prune_versions
+      vars:
+        prune_versions_dir: "{{ ai_agents_agy_versions }}"
+        prune_versions_keep: "{{ pinned_downloads.antigravity_cli.version }}"
+
+    - name: Install agy launcher in ~/.local/bin
+      ansible.builtin.copy:
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          export PATH="{{ ai_agents_agy_link }}:$PATH"
+          exec "{{ ai_agents_agy_link }}/antigravity" "$@"
+        dest: "{{ workstation_local_bin }}/agy"
+        mode: "0755"
+
+    - name: Verify agy launcher version
+      ansible.builtin.command:
+        argv:
+          - "{{ workstation_local_bin }}/agy"
+          - --version
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Apply Antigravity destructive-git ask guardrails
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              'python3',
+              '-B',
+              repo_root ~ '/scripts/antigravity_permissions.py',
+            ]
+            + (['--check'] if ansible_check_mode else [])
+          }}
+      register: ai_agents_agy_guardrails
+      check_mode: false
+      changed_when: "'Added ' in ai_agents_agy_guardrails.stdout or 'Would add ' in ai_agents_agy_guardrails.stdout"

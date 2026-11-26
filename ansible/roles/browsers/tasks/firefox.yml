@@ -1,0 +1,6 @@
+---
+- name: Install Firefox Developer Edition
+  community.general.pacman:
+    name: "{{ pacman_browser_packages }}"
+    state: present
+  become: true

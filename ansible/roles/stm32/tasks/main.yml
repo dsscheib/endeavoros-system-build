@@ -1,0 +1,132 @@
+---
+- name: Install reviewed ST-LINK udev rules
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/resources/udev/{{ item }}"
+    dest: "/etc/udev/rules.d/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - 49-stlinkv1.rules
+    - 49-stlinkv2.rules
+    - 49-stlinkv2-1.rules
+    - 49-stlinkv3.rules
+  become: true
+  notify: Reload stm32 udev rules
+
+- name: Flush stm32 udev handlers before running user-space installers
+  ansible.builtin.meta: flush_handlers
+
+- name: Check local availability of requested STMicroelectronics archives
+  ansible.builtin.command:
+    chdir: "{{ repo_root }}"
+    argv: >-
+      {{
+        [
+          'bash',
+          '-c',
+          'set -euo pipefail; source "$1/common.sh"; find_archive "" "${@:2}" 2>/dev/null',
+          '--',
+          repo_root,
+        ] + item.patterns
+      }}
+  loop:
+    - key: cubeide
+      script: install_stm32_cube_ide.sh
+      target: "{{ workstation_home }}/STMicroelectronics/STM32Cube/stm32cubeide"
+      wrapper: "{{ workstation_local_bin }}/stm32cubeide"
+      desktop: "{{ workstation_home }}/.local/share/applications/stm32cubeide.desktop"
+      patterns:
+        - "stm32cubeide_*.sh.zip"
+        - "stm32cubeide_*.zip"
+    - key: cubemx
+      script: install_stm32_cube_mx.sh
+      target: "{{ workstation_home }}/STMicroelectronics/STM32Cube/STM32CubeMX"
+      wrapper: "{{ workstation_local_bin }}/stm32cubemx"
+      desktop: "{{ workstation_home }}/.local/share/applications/st-com-stm32cubemx.desktop"
+      patterns:
+        - "SetupSTM32CubeMX-*.zip"
+        - "en.stm32cubemx-*.zip"
+    - key: cubeprog
+      script: install_stm32_cube_prog.sh
+      target: "{{ workstation_home }}/STMicroelectronics/STM32Cube/STM32CubeProgrammer"
+      wrapper: "{{ workstation_local_bin }}/stm32cubeprogrammer"
+      desktop: "{{ workstation_home }}/.local/share/applications/st-com-stm32cubeprogrammer.desktop"
+      patterns:
+        - "SetupSTM32CubeProgrammer_*.zip"
+        - "SetupSTM32CubeProgrammer-*.zip"
+    - key: sw4stm32
+      script: install_sw4stm32.sh
+      target: "{{ workstation_home }}/STMicroelectronics/sw4stm32"
+      wrapper: "{{ workstation_local_bin }}/sw4stm32"
+      desktop: "{{ workstation_home }}/.local/share/applications/sw4stm32-ide.desktop"
+      patterns:
+        - install_sw4stm32_linux_64bits.run
+        - "sw4stm32_*.run"
+  register: stm32_archive_probes
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  when: item.key in stm32_tools
+
+- name: Warn about requested STMicroelectronics tools without matching archives
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: Skipping {{ item.item.key }} ({{ item.item.patterns | join(', ') }}) —
+      no unique archive found in CWD, ST_DOWNLOAD_DIR, or ~/Downloads.
+  loop: "{{ stm32_archive_probes.results }}"
+  when:
+    - item.item.key in stm32_tools
+    - (item.rc | default(1)) != 0
+
+- name: Check whether requested STMicroelectronics installation is current in check mode
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -c
+      - >-
+        set -euo pipefail;
+        SCRIPT_DIR="$1";
+        source "$1/common.sh";
+        verify_installer "$2" 2>/dev/null && install_is_current "$3" "$4" "$5"
+      - --
+      - "{{ repo_root }}"
+      - "{{ item.stdout | trim }}"
+      - "{{ item.item.target }}"
+      - "{{ item.item.wrapper }}"
+      - "{{ item.item.desktop }}"
+  loop: "{{ stm32_archive_probes.results }}"
+  register: stm32_current_probes
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_check_mode
+    - item.item.key in stm32_tools
+    - (item.rc | default(1)) == 0
+
+- name: Report pending STMicroelectronics install in check mode
+  ansible.builtin.debug:
+    msg: "Would install {{ item.item.item.key }} from {{ item.item.stdout | trim }}"
+  loop: "{{ stm32_current_probes.results | default([]) }}"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - not (item.skipped | default(false))
+    - (item.rc | default(0)) != 0
+
+- name: Run requested STMicroelectronics user-space installers
+  ansible.builtin.command:
+    argv:
+      - bash
+      - "{{ repo_root }}/{{ item.item.script }}"
+      - "{{ item.stdout | trim }}"
+  environment:
+    ST_SKIP_UDEV: "1"
+  loop: "{{ stm32_archive_probes.results }}"
+  register: stm32_install_results
+  changed_when: "'(unchanged)' not in (stm32_install_results.stdout | default(''))"
+  when:
+    - item.item.key in stm32_tools
+    - (item.rc | default(1)) == 0
+    - not ansible_check_mode

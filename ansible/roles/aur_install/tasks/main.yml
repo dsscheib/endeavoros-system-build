@@ -1,0 +1,121 @@
+---
+# Install AUR packages non-interactively via aur_helper (yay) when enable_aur is true.
+# Inputs:
+#   aur_install_packages       list of AUR package names to ensure installed
+#   aur_install_ignore_errors  optional bool (default false): warn and continue on helper error
+
+- name: Check AUR helper availability
+  ansible.builtin.command:
+    argv:
+      - which
+      - "{{ aur_helper }}"
+  register: aur_install_helper_which
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  when:
+    - enable_aur | bool
+    - (aur_install_packages | default([])) | length > 0
+
+- name: Verify AUR helper is installed
+  ansible.builtin.assert:
+    that:
+      - aur_install_helper_which.rc == 0
+    fail_msg: >-
+      AUR helper '{{ aur_helper }}' is required when enable_aur is true.
+      Install {{ aur_helper }} or set enable_aur: false in local.yml.
+  when:
+    - enable_aur | bool
+    - (aur_install_packages | default([])) | length > 0
+
+- name: Ensure no stale temporary AUR sudoers rule remains from an interrupted run
+  ansible.builtin.file:
+    path: /etc/sudoers.d/99-eos-workstation-aur
+    state: absent
+  become: true
+  when:
+    - enable_aur | bool
+    - not ansible_check_mode
+    - (aur_install_packages | default([])) | length > 0
+
+- name: Query missing AUR packages
+  ansible.builtin.command:
+    argv: "{{ ['python3', repo_root ~ '/scripts/aur_install.py', 'missing'] + aur_install_packages }}"
+  register: aur_install_missing_cmd
+  check_mode: false
+  changed_when: false
+  when:
+    - enable_aur | bool
+    - (aur_install_packages | default([])) | length > 0
+
+- name: Report missing AUR packages in check mode
+  ansible.builtin.debug:
+    msg: "Would install AUR package(s) via {{ aur_helper }}: {{ aur_install_missing_cmd.stdout_lines | join(', ') }}"
+  changed_when: true
+  when:
+    - enable_aur | bool
+    - ansible_check_mode
+    - (aur_install_missing_cmd.stdout_lines | default([])) | length > 0
+
+- name: Install missing AUR packages non-interactively
+  when:
+    - enable_aur | bool
+    - not ansible_check_mode
+    - (aur_install_missing_cmd.stdout_lines | default([])) | length > 0
+  block:
+    - name: Grant temporary passwordless pacman rule for non-interactive AUR install
+      ansible.builtin.copy:
+        content: |
+          {{ workstation_user }} ALL=(root) NOPASSWD: /usr/bin/pacman
+        dest: /etc/sudoers.d/99-eos-workstation-aur
+        owner: root
+        group: root
+        mode: "0440"
+        validate: visudo -cf %s
+      become: true
+
+    - name: Run AUR helper for missing packages
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              'python3',
+              repo_root ~ '/scripts/aur_install.py',
+              'install',
+              '--helper', aur_helper,
+            ] + aur_install_missing_cmd.stdout_lines
+          }}
+      register: aur_install_run_cmd
+      changed_when: true
+  rescue:
+    - name: Fail when AUR package installation failed
+      ansible.builtin.fail:
+        msg: >-
+          AUR installation failed for {{ aur_install_missing_cmd.stdout_lines | join(', ') }}:
+          {{
+            [
+              aur_install_run_cmd.stderr | default(''),
+              aur_install_run_cmd.stdout | default(''),
+              aur_install_run_cmd.msg | default(''),
+            ] | map('trim') | reject('equalto', '') | join(' | ') | default('unknown error', true)
+          }}
+      when: not (aur_install_ignore_errors | default(false) | bool)
+
+    - name: Warn when optional AUR package installation failed
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: Optional AUR installation failed for {{ aur_install_missing_cmd.stdout_lines | join(', ') }}:
+          {{
+            [
+              aur_install_run_cmd.stderr | default(''),
+              aur_install_run_cmd.stdout | default(''),
+              aur_install_run_cmd.msg | default(''),
+            ] | map('trim') | reject('equalto', '') | join(' | ') | default('unknown error', true)
+          }}; continuing.
+      when: aur_install_ignore_errors | default(false) | bool
+  always:
+    - name: Remove temporary passwordless pacman rule
+      ansible.builtin.file:
+        path: /etc/sudoers.d/99-eos-workstation-aur
+        state: absent
+      become: true

@@ -1,0 +1,14 @@
+---
+- name: Install native GCC/G++ and base build tools
+  community.general.pacman:
+    name: "{{ pacman_toolchain_gcc_packages }}"
+    state: present
+  become: true
+
+- name: Verify GCC executable version
+  ansible.builtin.command:
+    argv:
+      - gcc
+      - --version
+  changed_when: false
+  when: not ansible_check_mode

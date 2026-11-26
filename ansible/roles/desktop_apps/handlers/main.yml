@@ -1,0 +1,70 @@
+---
+- name: Refresh font cache
+  ansible.builtin.command:
+    argv:
+      - fc-cache
+      - -f
+  changed_when: true
+
+- name: Refresh desktop applications database
+  ansible.builtin.command:
+    argv:
+      - update-desktop-database
+      - "{{ workstation_home }}/.local/share/applications"
+  changed_when: true
+  failed_when: false
+
+- name: Reload desktop udev rules
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - control
+      - --reload-rules
+  changed_when: true
+  become: true
+  when: eos_systemd_booted | default(false)
+
+- name: Trigger USB udev rules for desktop devices
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - trigger
+      - --subsystem-match=usb
+  listen: Reload desktop udev rules
+  changed_when: true
+  become: true
+  when: eos_systemd_booted | default(false)
+
+# Applies the cosmic-swipe uaccess rule to touchpads already present, so logind grants the
+# desktop user its ACL without a reboot. The daemon retries until the touchpad is readable.
+- name: Reload touchpad udev rules
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - control
+      - --reload-rules
+  changed_when: true
+  become: true
+  when: eos_systemd_booted | default(false)
+
+- name: Trigger input udev rules for touchpads
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - trigger
+      - --subsystem-match=input
+      - --action=change
+  listen: Reload touchpad udev rules
+  changed_when: true
+  become: true
+  when: eos_systemd_booted | default(false)
+
+- name: Restart cosmic-swipe
+  ansible.builtin.systemd_service:
+    name: cosmic-swipe.service
+    scope: user
+    state: restarted
+    daemon_reload: true
+  when: eos_systemd_booted | default(false)
+  tags:
+    - systemd_live

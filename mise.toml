@@ -1,0 +1,35 @@
+[tasks.bootstrap]
+description = "Bootstrap uv, mise, ansible-core, and required Galaxy collections"
+run = "bash ./bootstrap.sh"
+
+[tasks.apply]
+description = "Converge workstation state with Ansible (pass extra flags after --)"
+run = "bash ./scripts/ansible_run.sh apply"
+
+[tasks.plan]
+description = "Dry-run Ansible playbook with --check --diff"
+run = "bash ./scripts/ansible_run.sh plan"
+
+[tasks.role]
+description = "Run specific Ansible tag(s) (usage: mise run role <tag[,tag2]>)"
+run = "bash ./scripts/ansible_run.sh role"
+
+[tasks.auth]
+description = "Run interactive sign-in flows (GitHub CLI, Chezmoi, Google Drive rclone, Herdr)"
+run = "bash ./scripts/auth.sh"
+
+[tasks.lint]
+description = "Run Ansible syntax check and ansible-lint"
+run = "bash ./scripts/ansible_run.sh lint"
+
+[tasks.check]
+description = "Run all repository static checks and unit tests"
+run = "bash ./scripts/check.sh"
+
+[tasks.update]
+description = "Upgrade Pacman/AUR, Flatpak, Neovim and tmux plugins; report firmware and Mise tool updates"
+run = "bash ./scripts/update.sh"
+
+[tasks.pins]
+description = "Check this repo's pinned downloads and versions for updates (--bump NAME to update one)"
+run = "python3 ./scripts/check_pins.py"

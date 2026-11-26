@@ -1,0 +1,169 @@
+---
+- name: Apply full Pacman system upgrade when enabled
+  community.general.pacman:
+    update_cache: true
+    upgrade: true
+  become: true
+  when: system_pacman_upgrade | bool
+
+- name: Install base and dependency Pacman packages
+  community.general.pacman:
+    name: "{{ pacman_base_packages + pacman_dependency_packages }}"
+    state: present
+  become: true
+
+- name: Ensure hardware device groups exist
+  ansible.builtin.group:
+    name: "{{ item }}"
+    state: present
+    system: true
+  loop:
+    - uucp
+    - plugdev
+  become: true
+
+- name: Check existing hardware device groups
+  ansible.builtin.command:
+    argv:
+      - getent
+      - group
+      - "{{ item }}"
+  loop:
+    - uucp
+    - plugdev
+  register: system_group_checks
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+- name: Compute existing and pending hardware device groups
+  ansible.builtin.set_fact:
+    system_existing_hardware_groups: "{{ system_group_checks.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+    system_missing_hardware_groups: "{{ system_group_checks.results | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+
+- name: Add workstation user to uucp and plugdev groups
+  ansible.builtin.user:
+    name: "{{ workstation_user }}"
+    groups: "{{ system_existing_hardware_groups }}"
+    append: true
+  become: true
+  when: system_existing_hardware_groups | length > 0
+
+- name: Report pending hardware device group memberships in check mode
+  ansible.builtin.debug:
+    msg: >-
+      Would add {{ workstation_user }} to group(s) once created:
+      {{ system_missing_hardware_groups | join(', ') }}
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - system_missing_hardware_groups | length > 0
+
+- name: Ensure systemd journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Install journald retention drop-in
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/resources/systemd/journald.conf"
+    dest: /etc/systemd/journald.conf.d/zz-eos-workstation.conf
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Restart systemd-journald
+
+- name: Install Samsung 970 EVO NVMe power-management udev rule
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/resources/udev/99-samsung-970-evo-nvme.rules"
+    dest: /etc/udev/rules.d/99-samsung-970-evo-nvme.rules
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Reload udev rules
+  when: install_samsung_970_evo_nvme_rule | bool
+
+- name: Check whether UFW binary is installed
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -c
+      - PATH=/usr/sbin:/sbin:/usr/bin:/bin command -v ufw
+  register: system_ufw_cmd
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  tags:
+    - systemd_live
+
+- name: Check whether ufw.service unit exists
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - list-unit-files
+      - ufw.service
+      - --no-legend
+  register: system_ufw_unit
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  become: true
+  tags:
+    - systemd_live
+
+- name: Enable and start ufw.service on live hosts
+  ansible.builtin.systemd_service:
+    name: ufw.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+  when:
+    - eos_systemd_booted | default(false)
+    - not ansible_check_mode or ('ufw.service' in system_ufw_unit.stdout)
+  tags:
+    - systemd_live
+
+- name: Enable UFW firewall on live hosts
+  community.general.ufw:
+    state: enabled
+  become: true
+  when:
+    - eos_systemd_booted | default(false)
+    - not ansible_check_mode or system_ufw_cmd.rc == 0
+  tags:
+    - systemd_live
+
+- name: Check whether systemd-oomd.service unit exists
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - list-unit-files
+      - systemd-oomd.service
+      - --no-legend
+  register: system_oomd_unit
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  become: true
+  tags:
+    - systemd_live
+
+- name: Enable and start systemd-oomd on live hosts
+  ansible.builtin.systemd_service:
+    name: systemd-oomd.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+  when:
+    - eos_systemd_booted | default(false)
+    - not ansible_check_mode or ('systemd-oomd.service' in system_oomd_unit.stdout)
+  tags:
+    - systemd_live

@@ -1,0 +1,14 @@
+---
+- name: Install Clang/LLVM toolchain packages
+  community.general.pacman:
+    name: "{{ pacman_toolchain_llvm_packages }}"
+    state: present
+  become: true
+
+- name: Verify Clang executable version
+  ansible.builtin.command:
+    argv:
+      - clang
+      - --version
+  changed_when: false
+  when: not ansible_check_mode

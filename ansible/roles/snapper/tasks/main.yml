@@ -1,0 +1,334 @@
+---
+- name: Configure Snapper Btrfs snapshots and rollback
+  when: enable_snapper | bool
+  tags:
+    - snapper
+  block:
+    - name: Check Btrfs @ root and @snapshots layout prerequisites
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ repo_root }}/scripts/ensure_snapshots_subvol.py"
+          - --check
+      register: snapper_subvol_check
+      changed_when: false
+      check_mode: false
+      become: true
+
+    - name: Record root Btrfs filesystem UUID
+      ansible.builtin.command:
+        argv:
+          - findmnt
+          - -n
+          - -o
+          - UUID
+          - --mountpoint
+          - /
+      register: snapper_root_uuid_cmd
+      changed_when: false
+      check_mode: false
+
+    - name: Store root Btrfs filesystem UUID fact
+      ansible.builtin.set_fact:
+        snapper_root_uuid: "{{ snapper_root_uuid_cmd.stdout | trim }}"
+
+    - name: Install Snapper, snap-pac, and Btrfs packages
+      community.general.pacman:
+        name: >-
+          {{
+            pacman_snapper_packages
+            + (['btrfs-assistant'] if ansible_facts['distribution'] == 'EndeavourOS' else [])
+          }}
+        state: present
+      become: true
+
+    - name: Install optional btrfs-assistant AUR package on non-EndeavourOS hosts
+      ansible.builtin.include_role:
+        name: aur_install
+        apply:
+          tags:
+            - snapper
+      vars:
+        aur_install_packages: "{{ aur_snapper_gui_packages }}"
+        aur_install_ignore_errors: true
+      when: ansible_facts['distribution'] != 'EndeavourOS'
+
+    - name: Ensure @snapshots subvolume and mount at /.snapshots
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ repo_root }}/scripts/ensure_snapshots_subvol.py"
+      register: snapper_subvol_apply
+      changed_when: "'Created or mounted @snapshots' in snapper_subvol_apply.stdout"
+      become: true
+      when:
+        - not ansible_check_mode
+        - "'Needs setup:' in snapper_subvol_check.stdout"
+
+    - name: Report @snapshots subvolume setup needed in check mode
+      ansible.builtin.debug:
+        msg: "Would create/mount @snapshots at /.snapshots and update /etc/fstab"
+      changed_when: true
+      when:
+        - ansible_check_mode
+        - "'Needs setup:' in snapper_subvol_check.stdout"
+
+    - name: Clone pinned snapper-rollback repository
+      ansible.builtin.git:
+        repo: https://github.com/jrabinow/snapper-rollback.git
+        dest: /usr/local/src/snapper-rollback
+        version: "{{ snapper_rollback_commit }}"
+        force: false
+      become: true
+
+    - name: Check whether snapper-rollback source script exists
+      ansible.builtin.stat:
+        path: /usr/local/src/snapper-rollback/snapper-rollback.py
+      register: snapper_rollback_src_stat
+      become: true
+
+    - name: Install snapper-rollback executable
+      ansible.builtin.copy:
+        src: /usr/local/src/snapper-rollback/snapper-rollback.py
+        dest: /usr/local/bin/snapper-rollback
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+      when: not ansible_check_mode or snapper_rollback_src_stat.stat.exists
+
+    - name: Render snapper-rollback configuration
+      ansible.builtin.template:
+        src: snapper-rollback.conf.j2
+        dest: /etc/snapper-rollback.conf
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      become: true
+
+    - name: Ensure /etc/snapper/configs directory exists
+      ansible.builtin.file:
+        path: /etc/snapper/configs
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+
+    - name: Check existing Snapper root config
+      ansible.builtin.stat:
+        path: /etc/snapper/configs/root
+        checksum_algorithm: sha256
+      register: snapper_root_cfg_before
+      become: true
+
+    - name: Locate Snapper default configuration template
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/snapper/config-templates/default
+        - /usr/share/snapper/config-templates/default
+      register: snapper_template_stats
+      become: true
+      when: not snapper_root_cfg_before.stat.exists
+
+    - name: Verify Snapper default configuration template exists for initialization
+      ansible.builtin.assert:
+        that:
+          - (snapper_template_stats.results | selectattr('stat.exists') | list) | length > 0
+        fail_msg: >-
+          Snapper default configuration template is missing from
+          /etc/snapper/config-templates/default and /usr/share/snapper/config-templates/default.
+      when:
+        - not snapper_root_cfg_before.stat.exists
+        - not ansible_check_mode
+
+    - name: Report missing Snapper root config in check mode
+      ansible.builtin.debug:
+        msg: "Would initialize and configure /etc/snapper/configs/root and /etc/conf.d/snapper"
+      changed_when: true
+      when:
+        - ansible_check_mode
+        - not snapper_root_cfg_before.stat.exists
+
+    - name: Check Snapper root configuration drift in check mode
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ repo_root }}/scripts/configure_snapper.py"
+          - --check
+      register: snapper_cfg_check_cmd
+      check_mode: false
+      changed_when: "'Would update Snapper configuration.' in snapper_cfg_check_cmd.stdout"
+      become: true
+      when:
+        - ansible_check_mode
+        - snapper_root_cfg_before.stat.exists
+
+    - name: Check Snapper defaults file before update
+      ansible.builtin.stat:
+        path: /etc/conf.d/snapper
+        checksum_algorithm: sha256
+      register: snapper_defaults_before
+      become: true
+
+    - name: Apply Snapper root configuration settings
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['python3', repo_root ~ '/scripts/configure_snapper.py']
+            + (
+              [
+                '--initialize',
+                '--template',
+                (snapper_template_stats.results | selectattr('stat.exists') | first).stat.path,
+              ]
+              if not snapper_root_cfg_before.stat.exists
+              else []
+            )
+          }}
+      register: snapper_configure_cmd
+      changed_when: "'Snapper configuration updated.' in snapper_configure_cmd.stdout"
+      become: true
+      when: not ansible_check_mode
+
+    - name: Check Snapper config checksums after update
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop:
+        - /etc/snapper/configs/root
+        - /etc/conf.d/snapper
+      register: snapper_cfg_after
+      become: true
+
+    - name: Restart snapperd when Snapper configuration changed
+      ansible.builtin.systemd_service:
+        name: snapperd.service
+        state: restarted
+      become: true
+      when:
+        - eos_systemd_booted | default(false)
+        - not ansible_check_mode
+        - >-
+          (snapper_root_cfg_before.stat.checksum | default(''))
+          != (snapper_cfg_after.results[0].stat.checksum | default(''))
+          or (snapper_defaults_before.stat.checksum | default(''))
+          != (snapper_cfg_after.results[1].stat.checksum | default(''))
+
+    # configure_snapper.py edits SYNC_ACL in /etc/snapper/configs/root directly,
+    # whereas snapper -c root set-config triggers snapperd over D-Bus to apply POSIX ACLs.
+    - name: Enable Snapper ACL synchronization
+      ansible.builtin.command:
+        argv:
+          - snapper
+          - -c
+          - root
+          - set-config
+          - SYNC_ACL=yes
+      changed_when: false
+      become: true
+      when:
+        - eos_systemd_booted | default(false)
+        - not ansible_check_mode
+        - >-
+          not snapper_root_cfg_before.stat.exists
+          or (snapper_root_cfg_before.stat.checksum | default(''))
+          != (snapper_cfg_after.results[0].stat.checksum | default(''))
+
+    - name: Set /.snapshots permissions to 0750
+      ansible.builtin.file:
+        path: /.snapshots
+        state: directory
+        mode: "0750"
+      become: true
+      when: not ansible_check_mode or ('Needs setup:' not in snapper_subvol_check.stdout)
+
+    - name: Check whether snapper-cleanup.timer unit exists
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - list-unit-files
+          - snapper-cleanup.timer
+          - --no-legend
+      register: snapper_cleanup_timer_check
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      become: true
+
+    - name: Enable and start snapper-cleanup.timer
+      ansible.builtin.systemd_service:
+        name: snapper-cleanup.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+      become: true
+      when:
+        - eos_systemd_booted | default(false)
+        - not ansible_check_mode or ('snapper-cleanup.timer' in snapper_cleanup_timer_check.stdout)
+
+    - name: Check whether snapper-boot.timer unit exists
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - list-unit-files
+          - snapper-boot.timer
+          - --no-legend
+      register: snapper_boot_timer_check
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      become: true
+
+    - name: Enable and start snapper-boot.timer when available
+      ansible.builtin.systemd_service:
+        name: snapper-boot.timer
+        enabled: true
+        state: started
+      become: true
+      when:
+        - eos_systemd_booted | default(false)
+        - "'snapper-boot.timer' in snapper_boot_timer_check.stdout"
+
+- name: Configure Btrfs swapfile hibernation for dracut and systemd-boot
+  when: enable_hibernation | bool
+  tags:
+    - snapper
+    - hibernation
+  block:
+    - name: Run hibernation prerequisites check
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ repo_root }}/scripts/configure_hibernation.py"
+          - --check
+      changed_when: false
+      check_mode: false
+      become: true
+
+    - name: Check existing hibernation swapfile state
+      ansible.builtin.stat:
+        path: /swap/hibernate.swap
+      register: snapper_hibernation_swap_stat
+      become: true
+
+    - name: Report hibernation setup needed in check mode
+      ansible.builtin.debug:
+        msg: "Would configure Btrfs hibernation swap and dracut/systemd-boot resume parameters"
+      changed_when: true
+      when:
+        - ansible_check_mode
+        - not snapper_hibernation_swap_stat.stat.exists
+
+    - name: Configure Btrfs hibernation swap and resume parameters
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ repo_root }}/scripts/configure_hibernation.py"
+      register: snapper_hibernation_result
+      changed_when: "'Hibernation configured:' in snapper_hibernation_result.stdout"
+      become: true
+      when: not ansible_check_mode

@@ -1,0 +1,20 @@
+---
+- name: Install Google Chrome from AUR
+  ansible.builtin.include_role:
+    name: aur_install
+    apply:
+      tags:
+        - browsers
+        - chrome
+  vars:
+    aur_install_packages: "{{ aur_browser_packages }}"
+
+- name: Verify Google Chrome executable version
+  ansible.builtin.command:
+    argv:
+      - google-chrome-stable
+      - --version
+  changed_when: false
+  when:
+    - enable_aur | bool
+    - not ansible_check_mode

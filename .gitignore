@@ -1,0 +1,28 @@
+# Local environment configuration
+config.env
+config.secrets.env
+.env
+ansible/group_vars/all/local.yml
+
+# Downloaded installer archives & executables
+*.zip
+*.run
+*.deb
+*.pkg.tar.*
+*.iso
+
+# Temporary installer response files
+auto-install.xml
+installer.auto
+
+# OS and Editor artifacts
+.DS_Store
+*.swp
+*.bak*
+
+# Python test/import artifacts
+__pycache__/
+*.py[cod]
+
+# Personal Claude Code overrides
+.claude/settings.local.json

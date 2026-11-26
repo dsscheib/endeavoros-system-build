@@ -1,0 +1,207 @@
+---
+- name: Configure EndeavourOS workstation
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: true
+
+  pre_tasks:
+    - name: Verify supported OS, architecture, and non-root execution
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['architecture'] == 'x86_64'
+          - ansible_facts['os_family'] == 'Archlinux'
+          - ansible_facts['distribution'] in ['EndeavourOS', 'Archlinux']
+          - ansible_facts['user_uid'] != 0
+        fail_msg: >-
+          This playbook requires EndeavourOS or Arch Linux on x86_64 and must run
+          as your desktop user (not root).
+      tags:
+        - always
+
+    - name: Check whether systemd is running as PID 1
+      ansible.builtin.stat:
+        path: /run/systemd/system
+      register: eos_systemd_run_dir
+      tags:
+        - always
+
+    - name: Record live systemd availability
+      ansible.builtin.set_fact:
+        eos_systemd_booted: "{{ (ansible_facts['service_mgr'] == 'systemd') and (eos_systemd_run_dir.stat.isdir | default(false)) }}"
+      tags:
+        - always
+
+    - name: Ensure no stale temporary AUR sudoers rule remains
+      ansible.builtin.file:
+        path: /etc/sudoers.d/99-eos-workstation-aur
+        state: absent
+      become: true
+      when: not ansible_check_mode
+      tags:
+        - always
+
+  roles:
+    - role: system
+      tags:
+        - system
+    - role: snapper
+      when: (enable_snapper | bool) or (enable_hibernation | bool)
+      tags:
+        - snapper
+        - hibernation
+    - role: toolchains
+      tags:
+        - toolchains
+    - role: containers
+      tags:
+        - containers
+        - podman
+    - role: browsers
+      tags:
+        - browsers
+    - role: desktop_apps
+      tags:
+        - desktop_apps
+        - desktop_gui
+    - role: ai_agents
+      tags:
+        - ai_agents
+    - role: workstation
+      tags:
+        - workstation
+    - role: stm32
+      tags:
+        - never
+        - stm32
+
+  post_tasks:
+    - name: Generate dynamic shell completions for installed CLIs
+      ansible.builtin.include_tasks: tasks/completions.yml
+      tags:
+        - ai_agents
+        - completions
+        - workstation
+
+    - name: Locate Herdr binary for skill and integration sync
+      ansible.builtin.command:
+        argv:
+          - which
+          - herdr
+      environment:
+        PATH: "{{ workstation_local_bin }}:{{ workstation_home }}/.local/share/mise/shims:{{ ansible_facts['env'].PATH | default('/usr/bin:/bin') }}"
+      register: playbook_herdr_which
+      check_mode: false
+      changed_when: false
+      failed_when: false
+      tags:
+        - ai_agents
+        - herdr
+        - workstation
+
+    - name: Sync Herdr agent skills and integrations
+      when: playbook_herdr_which.rc == 0
+      tags:
+        - ai_agents
+        - herdr
+        - workstation
+      block:
+        - name: Generate release-matched Herdr SKILL.md
+          ansible.builtin.command:
+            argv:
+              - "{{ playbook_herdr_which.stdout | trim }}"
+              - --skill
+          environment:
+            PATH: "{{ workstation_local_bin }}:{{ workstation_home }}/.local/share/mise/shims:{{ ansible_facts['env'].PATH | default('/usr/bin:/bin') }}"
+          register: playbook_herdr_skill
+          check_mode: false
+          changed_when: false
+
+        - name: Ensure Herdr skill directories exist
+          ansible.builtin.file:
+            path: "{{ item }}/herdr"
+            state: directory
+            mode: "0755"
+          loop: "{{ herdr_skill_dirs }}"
+
+        - name: Install Herdr SKILL.md into agent skill directories
+          ansible.builtin.copy:
+            content: "{{ playbook_herdr_skill.stdout }}\n"
+            dest: "{{ item }}/herdr/SKILL.md"
+            mode: "0644"
+          loop: "{{ herdr_skill_dirs }}"
+
+        - name: Check Herdr configuration file presence
+          ansible.builtin.stat:
+            path: "{{ workstation_home }}/.config/herdr/config.toml"
+          register: playbook_herdr_config
+
+        - name: Validate Herdr configuration safely
+          when:
+            - playbook_herdr_config.stat.exists
+            - not ansible_check_mode
+          block:
+            - name: Validate Herdr configuration
+              ansible.builtin.command:
+                argv:
+                  - "{{ playbook_herdr_which.stdout | trim }}"
+                  - config
+                  - check
+              environment:
+                PATH: "{{ workstation_local_bin }}:{{ workstation_home }}/.local/share/mise/shims:{{ ansible_facts['env'].PATH | default('/usr/bin:/bin') }}"
+              register: playbook_herdr_config_check
+              changed_when: false
+          rescue:
+            - name: Warn when Herdr configuration validation failed
+              ansible.builtin.debug:
+                msg: >-
+                  WARNING: herdr config check failed (rc={{
+                    playbook_herdr_config_check.rc | default('unknown')
+                  }}): {{
+                    (playbook_herdr_config_check.stderr
+                     | default(playbook_herdr_config_check.stdout | default(''))) | trim
+                  }}
+
+        - name: Check installed agent CLIs for Herdr integrations
+          ansible.builtin.command:
+            argv:
+              - which
+              - "{{ item.cli }}"
+          environment:
+            PATH: "{{ workstation_local_bin }}:{{ workstation_home }}/.local/share/mise/shims:{{ ansible_facts['env'].PATH | default('/usr/bin:/bin') }}"
+          loop: "{{ herdr_agent_integrations }}"
+          register: playbook_agent_clis
+          check_mode: false
+          changed_when: false
+          failed_when: false
+          when: not ansible_check_mode
+
+        - name: Install Herdr integrations for present agent CLIs
+          ansible.builtin.command:
+            argv:
+              - "{{ playbook_herdr_which.stdout | trim }}"
+              - integration
+              - install
+              - "{{ item.item.target }}"
+          environment:
+            PATH: "{{ workstation_local_bin }}:{{ workstation_home }}/.local/share/mise/shims:{{ ansible_facts['env'].PATH | default('/usr/bin:/bin') }}"
+          loop: "{{ playbook_agent_clis.results | default([]) }}"
+          register: playbook_herdr_integrations
+          changed_when: false
+          failed_when: false
+          when:
+            - not ansible_check_mode
+            - not (item.skipped | default(false))
+            - item.rc == 0
+
+        - name: Warn when Herdr agent integration install failed
+          ansible.builtin.debug:
+            msg: >-
+              WARNING: herdr integration install {{ item.item.item.target }} failed (rc={{
+                item.rc | default('unknown')
+              }}): {{ (item.stderr | default(item.stdout | default(''))) | trim }}
+          loop: "{{ playbook_herdr_integrations.results | default([]) }}"
+          when:
+            - not ansible_check_mode
+            - not (item.skipped | default(false))
+            - (item.rc | default(0)) != 0

@@ -1,0 +1,29 @@
+---
+- name: Restart systemd-journald
+  ansible.builtin.systemd_service:
+    name: systemd-journald.service
+    state: restarted
+  become: true
+  when: eos_systemd_booted | default(false)
+
+- name: Reload udev rules
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - control
+      - --reload-rules
+  changed_when: true
+  become: true
+  when: eos_systemd_booted | default(false)
+
+- name: Trigger NVMe and PCI udev rules
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - trigger
+      - --subsystem-match=nvme
+      - --subsystem-match=pci
+  listen: Reload udev rules
+  changed_when: true
+  become: true
+  when: eos_systemd_booted | default(false)

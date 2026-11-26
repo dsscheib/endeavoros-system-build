@@ -1,0 +1,21 @@
+---
+- name: Reload stm32 udev rules
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - control
+      - --reload-rules
+  changed_when: true
+  become: true
+  when: eos_systemd_booted | default(false)
+
+- name: Trigger USB udev rules for ST-LINK probes
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - trigger
+      - --subsystem-match=usb
+  listen: Reload stm32 udev rules
+  changed_when: true
+  become: true
+  when: eos_systemd_booted | default(false)

@@ -1,0 +1,7 @@
+---
+- name: Install JetBrainsMono Nerd Font package
+  community.general.pacman:
+    name: "{{ pacman_fonts_packages }}"
+    state: present
+  become: true
+  notify: Refresh font cache
