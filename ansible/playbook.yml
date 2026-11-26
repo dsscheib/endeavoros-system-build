@@ -162,46 +162,7 @@
                      | default(playbook_herdr_config_check.stdout | default(''))) | trim
                   }}
 
-        - name: Check installed agent CLIs for Herdr integrations
-          ansible.builtin.command:
-            argv:
-              - which
-              - "{{ item.cli }}"
-          environment:
-            PATH: "{{ workstation_local_bin }}:{{ workstation_home }}/.local/share/mise/shims:{{ ansible_facts['env'].PATH | default('/usr/bin:/bin') }}"
-          loop: "{{ herdr_agent_integrations }}"
-          register: playbook_agent_clis
-          check_mode: false
-          changed_when: false
-          failed_when: false
-          when: not ansible_check_mode
-
-        - name: Install Herdr integrations for present agent CLIs
-          ansible.builtin.command:
-            argv:
-              - "{{ playbook_herdr_which.stdout | trim }}"
-              - integration
-              - install
-              - "{{ item.item.target }}"
-          environment:
-            PATH: "{{ workstation_local_bin }}:{{ workstation_home }}/.local/share/mise/shims:{{ ansible_facts['env'].PATH | default('/usr/bin:/bin') }}"
-          loop: "{{ playbook_agent_clis.results | default([]) }}"
-          register: playbook_herdr_integrations
-          changed_when: false
-          failed_when: false
-          when:
-            - not ansible_check_mode
-            - not (item.skipped | default(false))
-            - item.rc == 0
-
-        - name: Warn when Herdr agent integration install failed
-          ansible.builtin.debug:
-            msg: >-
-              WARNING: herdr integration install {{ item.item.item.target }} failed (rc={{
-                item.rc | default('unknown')
-              }}): {{ (item.stderr | default(item.stdout | default(''))) | trim }}
-          loop: "{{ playbook_herdr_integrations.results | default([]) }}"
-          when:
-            - not ansible_check_mode
-            - not (item.skipped | default(false))
-            - (item.rc | default(0)) != 0
+        - name: Install missing or outdated Herdr agent integrations
+          ansible.builtin.include_tasks: tasks/herdr_integrations.yml
+          vars:
+            herdr_bin: "{{ playbook_herdr_which.stdout | trim }}"

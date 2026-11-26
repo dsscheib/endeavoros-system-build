@@ -1,0 +1,90 @@
+---
+# Install Herdr agent integrations for agent CLIs that are present, skipping targets that
+# `herdr integration status` already reports as current (so reruns report no change).
+# Inputs:
+#   herdr_bin                 path to the herdr executable
+#   herdr_agent_integrations  list of {cli, target}
+
+- name: Check installed agent CLIs for Herdr integrations
+  ansible.builtin.command:
+    argv:
+      - which
+      - "{{ item.cli }}"
+  environment:
+    PATH: "{{ workstation_local_bin }}:{{ workstation_home }}/.local/share/mise/shims:{{ ansible_facts['env'].PATH | default('/usr/bin:/bin') }}"
+  loop: "{{ herdr_agent_integrations }}"
+  loop_control:
+    label: "{{ item.cli }}"
+  register: herdr_integrations_clis
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+- name: Read Herdr integration status
+  ansible.builtin.command:
+    argv:
+      - "{{ herdr_bin }}"
+      - integration
+      - status
+  register: herdr_integrations_status
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+# Status lines look like "claude: current (v11) (/path)"; anything not current is
+# (re)installed. If status itself fails, every present CLI's integration is installed.
+- name: Select Herdr integrations that are missing or outdated
+  ansible.builtin.set_fact:
+    herdr_integrations_pending: >-
+      {{
+        herdr_integrations_clis.results
+        | selectattr('rc', 'equalto', 0)
+        | map(attribute='item.target')
+        | reject('in', herdr_integrations_current)
+        | list
+      }}
+  vars:
+    herdr_integrations_current: >-
+      {{
+        (herdr_integrations_status.stdout_lines | default([]))
+        | map('regex_search', '^[^ :]+(?=( [(]experimental[)])?: current( |$))')
+        | select
+        | list
+        if herdr_integrations_status.rc == 0 else []
+      }}
+
+- name: Report Herdr integrations that would be installed
+  ansible.builtin.debug:
+    msg: "Would install Herdr integration {{ item }}"
+  loop: "{{ herdr_integrations_pending }}"
+  changed_when: true
+  when: ansible_check_mode
+
+- name: Install missing or outdated Herdr integrations
+  ansible.builtin.command:
+    argv:
+      - "{{ herdr_bin }}"
+      - integration
+      - install
+      - "{{ item }}"
+  environment:
+    PATH: "{{ workstation_local_bin }}:{{ workstation_home }}/.local/share/mise/shims:{{ ansible_facts['env'].PATH | default('/usr/bin:/bin') }}"
+  loop: "{{ herdr_integrations_pending }}"
+  register: herdr_integrations_install
+  changed_when: herdr_integrations_install.rc == 0
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Warn when Herdr agent integration install failed
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: herdr integration install {{ item.item }} failed (rc={{
+        item.rc | default('unknown')
+      }}): {{ (item.stderr | default(item.stdout | default(''))) | trim }}
+  loop: "{{ herdr_integrations_install.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - not ansible_check_mode
+    - not (item.skipped | default(false))
+    - (item.rc | default(0)) != 0
